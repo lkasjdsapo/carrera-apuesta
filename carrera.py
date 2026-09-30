@@ -44,6 +44,9 @@ class InterfazCarrera:
         self.posiciones = [0] * NUM_VEHICULOS      # píxeles recorridos por cada carro
         self.x_dibujado = [0] * NUM_VEHICULOS      # posición actual en el canvas (relativa a la salida)
         self.resultados = []                       # (vehiculo, tiempo) en orden de llegada
+        self.intervalos = [0.0] * NUM_VEHICULOS    # intervalo actual de cada carro
+        self.tramos = [0] * NUM_VEHICULOS          # tramo actual (ida/vuelta) de cada carro
+        self.timers = [None] * NUM_VEHICULOS       # el Timer pendiente de cada carro
         self.candado = threading.Lock()
         self.parar = threading.Event()
         self.corriendo = False
@@ -145,37 +148,44 @@ class InterfazCarrera:
         self.parar = threading.Event()
         inicio = time.time()
 
-        # Un hilo por vehículo
+        # Un temporizador por vehículo (arranca el primer disparo de cada uno)
         for i in range(NUM_VEHICULOS):
-            hilo = threading.Thread(target=self._correr, args=(i, inicio, self.parar), daemon=True)
-            hilo.start()
+            self.intervalos[i] = random.uniform(0.01, 0.05)
+            self.tramos[i] = 0
+            self._programar(i, inicio, self.parar)
 
         self._actualizar()
 
-    def _correr(self, i, inicio, parar):
-        """Esto se ejecuta en un hilo distinto para cada vehículo."""
-        distancia_total = self.rondas * 2 * RECORRIDO   # ida y vuelta por cada ronda
+    def _programar(self, i, inicio, parar):
+        """Crea y lanza el siguiente Timer del carro i."""
+        timer = threading.Timer(self.intervalos[i] / self.velocidad,
+                                self._avanzar, args=(i, inicio, parar))
+        timer.daemon = True
+        self.timers[i] = timer
+        timer.start()
 
-        intervalo = random.uniform(0.01, 0.05)   # intervalo aleatorio de este carro (su "timer")
-        tramo = 0                                # 0 = primera ida, 1 = primera vuelta, 2 = segunda ida...
-
-        while self.posiciones[i] < distancia_total and not parar.is_set():
-            self.posiciones[i] += 2                             # avanza 2 píxeles
-            time.sleep(intervalo / self.velocidad)              # pausa (más velocidad = menos pausa)
-
-            # Si llegó a un extremo (izquierdo o derecho), cambia el intervalo
-            nuevo_tramo = self.posiciones[i] // RECORRIDO
-            if nuevo_tramo != tramo:
-                tramo = nuevo_tramo
-                intervalo = random.uniform(0.01, 0.05)
-
+    def _avanzar(self, i, inicio, parar):
+        """Se ejecuta cada vez que dispara el Timer del carro i."""
         if parar.is_set():
             return
 
-        self.posiciones[i] = distancia_total
-        tiempo = time.time() - inicio
-        with self.candado:                                      # evita que dos hilos escriban a la vez
-            self.resultados.append((i + 1, tiempo))
+        self.posiciones[i] += 2                                 # avanza 2 píxeles
+        distancia_total = self.rondas * 2 * RECORRIDO
+
+        if self.posiciones[i] >= distancia_total:               # llegó a la meta
+            self.posiciones[i] = distancia_total
+            tiempo = time.time() - inicio
+            with self.candado:
+                self.resultados.append((i + 1, tiempo))
+            return
+
+        # Si llegó a un extremo, cambia el intervalo
+        nuevo_tramo = self.posiciones[i] // RECORRIDO
+        if nuevo_tramo != self.tramos[i]:
+            self.tramos[i] = nuevo_tramo
+            self.intervalos[i] = random.uniform(0.01, 0.05)
+
+        self._programar(i, inicio, parar)                       # re-arma el temporizador
 
     def _actualizar(self):
         """Corre en el hilo principal: lee las posiciones y mueve los carros."""
@@ -215,7 +225,10 @@ class InterfazCarrera:
         self.label_estado.config(text=mensaje)
 
     def reiniciar_carrera(self):
-        self.parar.set()          # avisa a los hilos que se detengan
+        self.parar.set()          # avisa a los temporizadores que se detengan
+        for t in self.timers:
+            if t:
+                t.cancel()
         self.corriendo = False
 
         for i in range(NUM_VEHICULOS):
